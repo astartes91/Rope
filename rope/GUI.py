@@ -117,7 +117,9 @@ class GUI(tk.Tk):
                             "Image":                    [],
                             "Embedding":                []
                             }   
-        self.source_faces = [] 
+        self.source_faces = []
+
+        self.media_file_path: str = ''
    
                                                     
 
@@ -1380,12 +1382,14 @@ class GUI(tk.Tk):
             self.video_slider.set(0)
             self.add_action("load_target_video", media_file)
             self.media_file_name = os.path.splitext(os.path.basename(media_file))
+            self.media_file_path = media_file
             self.video_loaded = True
 
 
         elif media_type == 'Image':
             self.add_action("load_target_image", media_file)
             self.media_file_name = os.path.splitext(os.path.basename(media_file))
+            self.media_file_path = media_file
             self.image_loaded = True
 
             # # find faces
@@ -1876,7 +1880,12 @@ class GUI(tk.Tk):
 
   
     def save_image(self):
-        filename =  self.media_file_name[0]+"_"+str(time.time())[:10]
+
+        target_media_file_name = self.media_file_path.replace('\\', '/')
+        path_components = target_media_file_name.split('/')
+        dir_name = path_components[-2]
+
+        filename =  dir_name + '_' + self.media_file_name[0]
         filename = os.path.join(self.json_dict["saved videos"], filename)
         cv2.imwrite(filename+'.jpg', cv2.cvtColor(self.video_image, cv2.COLOR_BGR2RGB))
         print('Image saved as:', filename+'.jpg')
@@ -1888,7 +1897,20 @@ class GUI(tk.Tk):
         # for button in self.target_media_buttons:
         #     button.invoke()
 
+        exist_files = [f for (_, _, filenames) in os.walk(self.json_dict["saved videos"]) for f in filenames]
+
         for i, target_media_file in enumerate(self.target_media_files):
+
+            target_media_file_name = target_media_file.replace('\\', '/')
+
+            path_components = target_media_file_name.split('/')
+            filename = path_components[-1].split('.')[0]
+            dir_name = path_components[-2]
+            target_filename = dir_name + '_' + filename + ".jpg"
+
+            if target_filename in exist_files:
+                logger.info('file ' + target_filename + ' already exists, skipping')
+                continue
 
             # target_media_file = self.target_media_files[i]
 
@@ -1906,13 +1928,8 @@ class GUI(tk.Tk):
             self.vm.get_requested_video_frame(0, True)
             img = self.vm.get_requested_frame()
             self.set_image(img, True)
-            split = ''
-            if '\\' in target_media_file:
-                split = '\\'
-            else:
-                split = '/'
-            filename = target_media_file.split(split)[-1].split('.')[0]
-            saved_filename = os.path.join(self.json_dict["saved videos"], filename + ".jpg")
+
+            saved_filename = os.path.join(self.json_dict["saved videos"], target_filename)
             cv2.imwrite(saved_filename, cv2.cvtColor(img[0], cv2.COLOR_BGR2RGB))
             logger.debug('write file: ' + saved_filename)
 
