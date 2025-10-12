@@ -1,4 +1,6 @@
 import os
+from typing import Any
+
 import cv2
 import tkinter as tk
 from tkinter import filedialog, font
@@ -10,6 +12,8 @@ import copy
 import bisect
 import torch
 import torchvision
+
+from rope import Models
 
 torchvision.disable_beta_transforms_warning()
 import mimetypes
@@ -38,7 +42,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class GUI(tk.Tk):
-    def __init__(self, models, vm: VM.VideoManager):
+    def __init__(self, models: Models.Models, vm: VM.VideoManager):
         super().__init__()
 
         self.models = models
@@ -109,7 +113,7 @@ class GUI(tk.Tk):
                             "EmbeddingNumber":          0,       #used for adding additional found faces
                             'AssignedEmbedding':        [],     #the currently assigned source embedding, including averaged ones
                             }
-        self.target_faces = []
+        self.target_faces: list[dict[str, Any]] = []
         
         self.source_face =  {
                             "TKButton":                 [],
