@@ -156,8 +156,8 @@ def run():
     global gui, vm, action, frame, r_frame, resize_delay, mem_delay
 
     models = Models.Models()
-    gui = GUI.GUI(models)
     vm = VM.VideoManager(models)
+    gui = GUI.GUI(models, vm)
     
 
     action = []

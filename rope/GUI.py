@@ -1,4 +1,6 @@
 import os
+from typing import Any
+
 import cv2
 import tkinter as tk
 from tkinter import filedialog, font
@@ -10,6 +12,8 @@ import copy
 import bisect
 import torch
 import torchvision
+
+from rope import Models
 
 torchvision.disable_beta_transforms_warning()
 import mimetypes
@@ -24,14 +28,28 @@ from skimage import transform as trans
 from torchvision.transforms import v2
 
 import inspect #print(inspect.currentframe().f_back.f_code.co_name, 'resize_image')
+import rope.VideoManager as VM
+
+import logging
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 class GUI(tk.Tk):
-    def __init__(self, models):  
+    def __init__(self, models: Models.Models, vm: VM.VideoManager):
         super().__init__()
 
         self.models = models
+        self.vm = vm
         self.title('Rope-Pearl-00')
         self.target_media = []
+        self.target_media_files: list[str] = []
         self.target_video_file = []
         self.action_q = []
         self.video_image = []
@@ -95,7 +113,7 @@ class GUI(tk.Tk):
                             "EmbeddingNumber":          0,       #used for adding additional found faces
                             'AssignedEmbedding':        [],     #the currently assigned source embedding, including averaged ones
                             }
-        self.target_faces = []
+        self.target_faces: list[dict[str, Any]] = []
         
         self.source_face =  {
                             "TKButton":                 [],
@@ -103,7 +121,9 @@ class GUI(tk.Tk):
                             "Image":                    [],
                             "Embedding":                []
                             }   
-        self.source_faces = [] 
+        self.source_faces = []
+
+        self.media_file_path: str = ''
    
                                                     
 
@@ -182,12 +202,26 @@ class GUI(tk.Tk):
 
       # Input Videos
         # Button Frame
-        frame = tk.Frame(self.layer['InputVideoFrame'], style.canvas_frame_label_2, height = 42)
-        frame.grid(row=0, column=0, columnspan = 2, sticky='NEWS', padx=0, pady=0)
+        frame = tk.Frame(self.layer['InputVideoFrame'], style.canvas_frame_label_2, height = 80)
+        frame.grid(row=0, column=0, columnspan = 3, sticky='NEWS', padx=0, pady=0)
 
         # Buttons
         self.widget['VideoFolderButton'] = GE.Button(frame, 'LoadTVideos', 2, self.select_video_path, None, 'control', 10, 1, width=195)
+        self.widget['WithSubfoldersSwitch'] = GE.Switch2(
+            frame,
+            'WithSubfoldersSwitch',
+            'With Subfolders',
+            3,
+            self.switch_nop,
+            'parameter'
+            '',
+            398,
+            20,
+            1,
+            40
+        )
         self.input_videos_text = GE.Text(frame, '', 2, 10, 20, 190, 20)
+        self.widget['SourceFileButton'] = GE.Button(frame, 'LoadSourceFile', 2, self.select_source_file_path, None, 'control', 10, 60, width=195)
 
         # Input Videos Canvas
         self.target_media_canvas = tk.Canvas(self.layer['InputVideoFrame'], style.canvas_frame_label_3, height=100, width=195)
@@ -339,6 +373,7 @@ class GUI(tk.Tk):
         self.layer['image_controls'] = tk.Frame(self.layer['preview_column'], style.canvas_frame_label_2, height=80)
         self.layer['image_controls'].grid(row=2, column=0, rowspan=2, sticky='NEWS', pady=0)
         self.widget['SaveImageButton'] = GE.Button(self.layer['image_controls'], 'SaveImageButton', 2, self.save_image, None, 'control', x=10, y=5, width=100)
+        self.widget['SaveAllImagesButton'] = GE.Button(self.layer['image_controls'], 'SaveAllImagesButton', 2, self.save_all_images, None, 'control', x=90, y=5, width=100)
         self.widget['AutoSwapButton'] = GE.Button(self.layer['image_controls'], 'AutoSwapButton', 2, self.toggle_auto_swap, None, 'control', x=150, y=5, width=100)
 
 
@@ -653,6 +688,7 @@ class GUI(tk.Tk):
 
 
 
+    def switch_nop(self, mode, name, use_markers=False): None
 
 
     # Update the parameters or controls dicts and get a new frame
@@ -888,6 +924,23 @@ class GUI(tk.Tk):
         self.widget['VideoFolderButton'].set(False, request_frame=False)
         self.populate_target_videos()
 
+    def select_source_file_path(self):
+        temp = self.json_dict["source videos"]
+        # self.json_dict["source videos"] = filedialog.askdirectory(title="Select Target Videos Folder", initialdir=temp)
+        #
+        # path = self.create_path_string(self.json_dict["source videos"], 28)
+        # self.input_videos_text.configure(text=path)
+        #
+        # with open("data.json", "w") as outfile:
+        #     json.dump(self.json_dict, outfile)
+        #     outfile.close()
+        #self.widget['VideoFolderButton'].set(False, request_frame=False)
+
+        filenames = [file.name  for file in filedialog.askopenfiles(title="Select Source Files", initialdir=temp)]
+
+        self.widget['SourceFileButton'].set(False, request_frame=False)
+        self.populate_target_videos(filenames)
+
     def select_save_video_path(self):
         temp = self.json_dict["saved videos"]
         self.json_dict["saved videos"] = filedialog.askdirectory(title="Select Save Video Folder", initialdir=temp)
@@ -1019,6 +1072,7 @@ class GUI(tk.Tk):
         torch.cuda.empty_cache()
 
     def find_faces(self):
+        logger.debug("find target faces")
         try:
             img = torch.from_numpy(self.video_image).to('cuda')
             img = img.permute(2,0,1)
@@ -1063,6 +1117,7 @@ class GUI(tk.Tk):
 
                         new_target_face = self.target_face.copy()
                         self.target_faces.append(new_target_face)
+                        logger.debug("Found new face. Target face number: {}".format(len(self.target_faces)))
                         last_index = len(self.target_faces)-1
 
                         self.target_faces[last_index]["TKButton"] = tk.Button(self.found_faces_canvas, style.media_button_off_3, height = 86, width = 86)
@@ -1079,8 +1134,10 @@ class GUI(tk.Tk):
                         self.found_faces_canvas.create_window((last_index)*92, 8, window=self.target_faces[last_index]["TKButton"], anchor='nw')
 
                         self.found_faces_canvas.configure(scrollregion = self.found_faces_canvas.bbox("all"))
+        logger.debug("find target faces completed")
 
     def clear_faces(self):
+        logger.debug("Clearing Faces")
         self.target_faces = []
         self.found_faces_canvas.delete("all")
 
@@ -1192,14 +1249,29 @@ class GUI(tk.Tk):
 
 
 
-    def populate_target_videos(self):
-        # Recursively read all media files from directory
-        directory =  self.json_dict["source videos"]
-        filenames = [os.path.join(dirpath,f) for (dirpath, dirnames, filenames) in os.walk(directory) for f in filenames]
+    def populate_target_videos(self, filenames = []):
+
+        if len(filenames) == 0:
+            # Read only top-level media files from directory
+            directory =  self.json_dict["source videos"]
+
+            with_subfolders = self.widget['WithSubfoldersSwitch'].state
+
+            filenames = []
+
+            if not with_subfolders:
+                filenames = [
+                    os.path.join(directory, f)
+                    for f in os.listdir(directory)
+                    if os.path.isfile(os.path.join(directory, f))
+                ]
+            else:
+                filenames = [os.path.join(dirpath,f) for (dirpath, dirnames, filenames) in os.walk(directory) for f in filenames]
 
         videos = []
         images = []
         self.target_media = []
+        self.target_media_files = []
         self.target_media_buttons = []
         self.target_media_canvas.delete("all")
 
@@ -1262,6 +1334,7 @@ class GUI(tk.Tk):
 
                 rgb_video = Image.fromarray(images[i][0])
                 self.target_media.append(ImageTk.PhotoImage(image=rgb_video))
+                self.target_media_files.append(images[i][1])
                 self.target_media_buttons[i].config( image = self.target_media[i],  command=lambda i=i: self.load_target(i, images[i][1], self.widget['PreviewModeTextSel'].get()))
                 self.target_media_buttons[i].bind("<MouseWheel>", self.target_videos_mouse_wheel)
                 self.target_media_canvas.create_window((i%2)*delx, (i//2)*dely, window = self.target_media_buttons[i], anchor='nw')
@@ -1284,16 +1357,18 @@ class GUI(tk.Tk):
 
             self.static_widget['input_videos_scrollbar'].resize_scrollbar(None)
 
-    def auto_swap(self):
+    def auto_swap(self, from_gui=True):
             # Reselect Target Image
             # try:
             self.find_faces()
-            self.target_faces[0]["ButtonState"] = True
-            self.target_faces[0]["TKButton"].config(style.media_button_on_3)
+
+            if len(self.target_faces) != 0:
+                self.target_faces[0]["ButtonState"] = True
+                self.target_faces[0]["TKButton"].config(style.media_button_on_3)
 
             # Reselect Source images
             self.select_input_faces('auto', '')
-            self.toggle_swapper(True)
+            self.toggle_swapper(True, from_gui)
             # except:
             #     pass
     def toggle_auto_swap(self):
@@ -1311,12 +1386,14 @@ class GUI(tk.Tk):
             self.video_slider.set(0)
             self.add_action("load_target_video", media_file)
             self.media_file_name = os.path.splitext(os.path.basename(media_file))
+            self.media_file_path = media_file
             self.video_loaded = True
 
 
         elif media_type == 'Image':
             self.add_action("load_target_image", media_file)
             self.media_file_name = os.path.splitext(os.path.basename(media_file))
+            self.media_file_path = media_file
             self.image_loaded = True
 
             # # find faces
@@ -1341,6 +1418,7 @@ class GUI(tk.Tk):
 
     # @profile
     def set_image(self, image, requested):
+        logger.debug('set_image')
         self.video_image = image[0]
         frame = image[1]
 
@@ -1488,7 +1566,7 @@ class GUI(tk.Tk):
         self.widget['TLPlayButton'].disable_button()
 
 
-    def toggle_swapper(self, toggle_value=-1):
+    def toggle_swapper(self, toggle_value=-1, from_gui=True):
         # print(inspect.currentframe().f_back.f_code.co_name, 'toggle_swapper: '+'toggle_value='+str(toggle_value))
 
         if toggle_value == -1:
@@ -1499,13 +1577,13 @@ class GUI(tk.Tk):
                 self.widget['SwapFacesButton'].enable_button()
             else:
                 self.widget['SwapFacesButton'].disable_button()
-
-        if self.widget['PreviewModeTextSel'].get()=='Video' or self.widget['PreviewModeTextSel'].get()=='Theater':
-            self.update_data('control', 'SwapFacesButton', use_markers=True)
-        elif self.widget['PreviewModeTextSel'].get()=='Image':
-            self.update_data('control', 'SwapFacesButton', use_markers=False)
-        elif self.widget['PreviewModeTextSel'].get() == 'FaceLab':
-            self.update_data('control', 'SwapFacesButton', use_markers=False)
+        if from_gui:
+            if self.widget['PreviewModeTextSel'].get()=='Video' or self.widget['PreviewModeTextSel'].get()=='Theater':
+                self.update_data('control', 'SwapFacesButton', use_markers=True)
+            elif self.widget['PreviewModeTextSel'].get()=='Image':
+                self.update_data('control', 'SwapFacesButton', use_markers=False)
+            elif self.widget['PreviewModeTextSel'].get() == 'FaceLab':
+                self.update_data('control', 'SwapFacesButton', use_markers=False)
 
 
     def temp_toggle_swapper(self, state):
@@ -1806,10 +1884,68 @@ class GUI(tk.Tk):
 
   
     def save_image(self):
-        filename =  self.media_file_name[0]+"_"+str(time.time())[:10]
+
+        target_media_file_name = self.media_file_path.replace('\\', '/')
+        path_components = target_media_file_name.split('/')
+        dir_name = path_components[-2]
+
+        filename =  dir_name + '_' + self.media_file_name[0]
         filename = os.path.join(self.json_dict["saved videos"], filename)
-        cv2.imwrite(filename+'.png', cv2.cvtColor(self.video_image, cv2.COLOR_BGR2RGB))
-        print('Image saved as:', filename+'.png')
+        cv2.imwrite(filename+'.jpg', cv2.cvtColor(self.video_image, cv2.COLOR_BGR2RGB))
+        print('Image saved as:', filename+'.jpg')
+
+    def save_all_images(self):
+
+        # for target_image in self.target_media:
+        #     self.add_action('load_target_image', target_image)
+        # for button in self.target_media_buttons:
+        #     button.invoke()
+
+        exist_files = [f for (_, _, filenames) in os.walk(self.json_dict["saved videos"]) for f in filenames]
+
+        for i, target_media_file in enumerate(self.target_media_files):
+
+            target_media_file_name = target_media_file.replace('\\', '/')
+
+            path_components = target_media_file_name.split('/')
+            filename = path_components[-1].split('.')[0]
+            dir_name = path_components[-2]
+            target_filename = dir_name + '_' + filename + ".jpg"
+
+            if target_filename in exist_files:
+                logger.info('file ' + target_filename + ' already exists, skipping')
+                continue
+
+            # target_media_file = self.target_media_files[i]
+
+            logger.info('---------- processing file: ' + target_media_file + ' ----------------')
+
+            # self.add_action_block('load_target_image', target_media_file)
+            self.clear_faces()
+            # self.load_target(i, target_media_file, 'Image')
+            self.vm.load_target_image(target_media_file)
+            self.set_image(self.vm.get_frame(), True)
+            self.auto_swap(False)
+            # self.find_faces()
+            self.vm.assign_found_faces(self.target_faces)
+            # self.add_action_block('get_requested_video_frame_without_markers', self.video_slider.get())
+            self.vm.get_requested_video_frame(0, True)
+            img = self.vm.get_requested_frame()
+            self.set_image(img, True)
+
+            saved_filename = os.path.join(self.json_dict["saved videos"], target_filename)
+            cv2.imwrite(saved_filename, cv2.cvtColor(img[0], cv2.COLOR_BGR2RGB))
+            logger.debug('write file: ' + saved_filename)
+
+            logger.info('---------- processing file ' + target_media_file + ' completed ----------------')
+
+        # self.target_media
+        # self.add_action('get_requested_video_frame', self.video_slider.get())
+
+        # filename =  self.media_file_name[0]+"_"+str(time.time())[:10]
+        # filename = os.path.join(self.json_dict["saved videos"], filename)
+        # cv2.imwrite(filename+'.jpg', cv2.cvtColor(self.video_image, cv2.COLOR_BGR2RGB))
+        # print('Image saved as:', filename+'.jpg')
    
     def clear_mem(self):
         self.widget['RestorerSwitch'].set(False)

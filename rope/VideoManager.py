@@ -1,6 +1,8 @@
 import os
 import cv2
 import tkinter as tk
+
+import numpy
 from PIL import Image, ImageTk
 import threading
 import time
@@ -11,6 +13,7 @@ from math import floor, ceil
 import bisect
 import onnxruntime
 import torchvision
+from torch import Tensor
 from torchvision.transforms.functional import normalize #update to v2
 import torch
 from torchvision import transforms
@@ -24,6 +27,19 @@ import inspect #print(inspect.currentframe().f_back.f_code.co_name, 'resize_imag
 device = 'cuda'
 
 lock=threading.Lock()
+
+import logging
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+from numpy import ndarray
 
 class VideoManager():  
     def __init__(self, models ):
@@ -124,6 +140,7 @@ class VideoManager():
 
     def assign_found_faces(self, found_faces):
         self.found_faces = found_faces
+        logger.debug('new ' + str(len(found_faces)) +  ' found faces setted')
 
 
     def load_target_video( self, file ):
@@ -175,6 +192,7 @@ class VideoManager():
         self.frame_q.append(temp)
 
         self.is_image_loaded = True
+        logger.debug('source image ' + file + ' loaded')
 
     
     ## Action queue
@@ -209,7 +227,7 @@ class VideoManager():
         return len(self.r_frame_q)          
     
 
-    def get_requested_video_frame(self, frame, marker=True):  
+    def get_requested_video_frame(self, frame: int, marker=True):
         temp = []
         if self.is_video_loaded:
         
@@ -505,7 +523,10 @@ class VideoManager():
 
 
     # @profile
-    def swap_video(self, target_image, frame_number, use_markers):
+    def swap_video(self, target_image: ndarray, frame_number, use_markers):
+
+        logger.debug('run face swapping')
+
         # Grab a local copy of the parameters to prevent threading issues
         parameters = self.parameters.copy()
         control = self.control.copy()
@@ -520,12 +541,12 @@ class VideoManager():
             parameters = self.markers[idx-1]['parameters'].copy()
         
         # Load frame into VRAM
-        img = torch.from_numpy(target_image.astype('uint8')).to('cuda') #HxWxc
-        img = img.permute(2,0,1)#cxHxW        
+        input_img: Tensor = torch.from_numpy(target_image.astype('uint8')).to('cuda') #HxWxc
+        input_img = input_img.permute(2,0,1)#cxHxW
         
         #Scale up frame if it is smaller than 512
-        img_x = img.size()[2]
-        img_y = img.size()[1]
+        img_x = input_img.size()[2]
+        img_y = input_img.size()[1]
         
         if img_x<512 and img_y<512:
             # if x is smaller, set x to 512
@@ -534,53 +555,67 @@ class VideoManager():
             else:
                 tscale = v2.Resize((512, int(512*img_x/img_y)), antialias=True)
 
-            img = tscale(img)
+            input_img = tscale(input_img)
             
         elif img_x<512:
             tscale = v2.Resize((int(512*img_y/img_x), 512), antialias=True)
-            img = tscale(img)
+            input_img = tscale(input_img)
         
         elif img_y<512:
             tscale = v2.Resize((512, int(512*img_x/img_y)), antialias=True)
-            img = tscale(img)    
+            input_img = tscale(input_img)
 
         # Rotate the frame
         if parameters['OrientSwitch']:
-            img = v2.functional.rotate(img, angle=parameters['OrientSlider'], interpolation=v2.InterpolationMode.BILINEAR, expand=True)
+            input_img = v2.functional.rotate(input_img, angle=parameters['OrientSlider'], interpolation=v2.InterpolationMode.BILINEAR, expand=True)
 
-        # Find all faces in frame and return a list of 5-pt kpss
-        kpss = self.func_w_test("detect", self.models.run_detect, img, parameters['DetectTypeTextSel'], max_num=20, score=parameters['DetectScoreSlider']/100.0)
+        # Find all faces in frame and return a list of 5-pt input_face_kpss
+        input_face_kpss: ndarray = self.func_w_test("detect", self.models.run_detect, input_img, parameters['DetectTypeTextSel'], max_num=20, score=parameters['DetectScoreSlider']/100.0)
         # Get embeddings for all faces found in the fram
-        ret = []
-        for face_kps in kpss:
-            face_emb, _ = self.func_w_test('recognize',  self.models.run_recognize, img, face_kps)
+        ret: list[list[ndarray]] = []
+        for face_kps in input_face_kpss:
+            face_emb, _ = self.func_w_test('recognize',  self.models.run_recognize, input_img, face_kps)
             ret.append([face_kps, face_emb])
         
         if ret:
             # Loop through target faces to see if they match our found face embeddings
-            for fface in ret:
-                for found_face in self.found_faces:
+            for input_face in ret:
+                for ext_found_face in self.found_faces:
                     # sim between face in video and already found face
-                    sim = self.findCosineDistance(fface[1], found_face["Embedding"])
+                    ext_found_face_embedding: ndarray = ext_found_face["Embedding"]
+                    # logger.debug('Embedding: ' + numpy.array_str(ext_found_face_embedding))
+                    # logger.debug('fface1: ' + numpy.array_str(input_face[1]))
+                    input_face_embedding: ndarray = input_face[1]
+                    sim = self.findCosineDistance(input_face_embedding, ext_found_face_embedding)
+                    logger.debug('sim:' + str(sim))
                     # if the face[i] in the frame matches afound face[j] AND the found face is active (not []) 
-                    if sim>=float(parameters["ThresholdSlider"]) and found_face["SourceFaceAssignments"]:
-                        s_e = found_face["AssignedEmbedding"]
-                        # s_e = found_face['ptrdata']
-                        img = self.func_w_test("swap_video", self.swap_core, img, fface[0], s_e, parameters, control)
-                        # img = img.permute(2,0,1)
+                    if sim>=float(parameters["ThresholdSlider"]) and ext_found_face["SourceFaceAssignments"]:
+                        ext_found_face_assigned_embedding: ndarray = ext_found_face["AssignedEmbedding"]
+                        # ext_found_face_assigned_embedding = ext_found_face['ptrdata']
+                        input_found_face_kps: ndarray = input_face[0]
+                        input_img = self.func_w_test(
+                            "swap_video",
+                            self.swap_core,
+                            input_img,
+                            input_found_face_kps,
+                            ext_found_face_assigned_embedding,
+                            parameters,
+                            control
+                        )
+                        # input_img = input_img.permute(2,0,1)
                     
-            img = img.permute(1,2,0)
+            input_img = input_img.permute(1,2,0)
             if not control['MaskViewButton'] and parameters['OrientSwitch']:
-                img = img.permute(2,0,1)
-                img = transforms.functional.rotate(img, angle=-parameters['OrientSlider'], expand=True)
-                img = img.permute(1,2,0)
+                input_img = input_img.permute(2,0,1)
+                input_img = transforms.functional.rotate(input_img, angle=-parameters['OrientSlider'], expand=True)
+                input_img = input_img.permute(1,2,0)
 
         else:
-            img = img.permute(1,2,0)
+            input_img = input_img.permute(1,2,0)
             if parameters['OrientSwitch']:
-                img = img.permute(2,0,1)
-                img = v2.functional.rotate(img, angle=-parameters['OrientSlider'], interpolation=v2.InterpolationMode.BILINEAR, expand=True)
-                img = img.permute(1,2,0)
+                input_img = input_img.permute(2,0,1)
+                input_img = v2.functional.rotate(input_img, angle=-parameters['OrientSlider'], interpolation=v2.InterpolationMode.BILINEAR, expand=True)
+                input_img = input_img.permute(1,2,0)
         
         if self.perf_test:
             print('------------------------')  
@@ -588,12 +623,12 @@ class VideoManager():
         # Unscale small videos
         if img_x <512 or img_y < 512:
             tscale = v2.Resize((img_y, img_x), antialias=True)
-            img = img.permute(2,0,1)
-            img = tscale(img)
-            img = img.permute(1,2,0)
+            input_img = input_img.permute(2,0,1)
+            input_img = tscale(input_img)
+            input_img = input_img.permute(1,2,0)
             
 
-        img = img.cpu().numpy()  
+        input_img = input_img.cpu().numpy()
 
         # if ret:
         #
@@ -601,12 +636,12 @@ class VideoManager():
         #         for i in range(-1, 1):
         #             for j in range(-1, 1):
         #
-        #                 img[int(kpoint[1])+i][int(kpoint[0])+j][0] = 255
-        #                 img[int(kpoint[1])+i][int(kpoint[0])+j][1] = 255
-        #                 img[int(kpoint[1])+i][int(kpoint[0])+j][2] = 255
+        #                 input_img[int(kpoint[1])+i][int(kpoint[0])+j][0] = 255
+        #                 input_img[int(kpoint[1])+i][int(kpoint[0])+j][1] = 255
+        #                 input_img[int(kpoint[1])+i][int(kpoint[0])+j][2] = 255
 
-        
-        return img.astype(np.uint8)
+        logger.debug('complete face swapping')
+        return input_img.astype(np.uint8)
 
     def findCosineDistance(self, vector1, vector2):
         cos_dist = 1.0 - np.dot(vector1, vector2)/(np.linalg.norm(vector1)*np.linalg.norm(vector2)) # 2..0
@@ -624,6 +659,8 @@ class VideoManager():
 
     # @profile    
     def swap_core(self, img, kps, s_e, parameters, control): # img = RGB
+
+        logger.debug('run swap core')
         # 512 transforms
         dst = self.arcface_dst * 4.0
         dst[:,0] += 32.0
@@ -876,6 +913,7 @@ class VideoManager():
             img = torch.hstack([original_face_512, swap_mask*255])
             img = img.permute(2,0,1)
 
+        logger.debug('completed swap core')
         return img
         
     # @profile    
